@@ -304,3 +304,46 @@ def test_a_ticker_or_date_given_twice_runs_and_settles_once(tmp_path):
     graph = _FakeGraph.instances[-1]
     assert graph.calls == [("NVDA", "2026-01-05")]
     assert graph.settled == ["NVDA"]
+
+
+# --- the grid does not pay for days the market is shut -------------------------
+
+@pytest.mark.unit
+def test_weekend_cells_are_skipped_for_stocks(tmp_path):
+    """2026-01-03/04 are a Saturday and a Sunday: a stock sweep runs no cell
+    with no session to anchor the decision to, and counts it as skipped."""
+    result = run_backtest(["NVDA"], ["2026-01-02", "2026-01-03", "2026-01-04", "2026-01-05"],
+                          _config(tmp_path), asset_type="stock")
+
+    assert list(_FakeGraph.instances[-1].calls) == [("NVDA", "2026-01-02"), ("NVDA", "2026-01-05")]
+    assert result.cells_run == 2 and result.skipped == 2
+
+
+@pytest.mark.unit
+def test_weekend_cells_run_for_crypto(tmp_path):
+    """Crypto trades at weekends, so its grid keeps every calendar day."""
+    result = run_backtest(["BTC"], ["2026-01-03", "2026-01-04"], _config(tmp_path),
+                          asset_type="crypto")
+
+    assert result.cells_run == 2 and result.skipped == 0
+
+
+@pytest.mark.unit
+def test_market_day_helper():
+    from tradingagents.backtest import is_market_day
+
+    assert is_market_day("2026-01-02", "stock") is True    # Friday
+    assert is_market_day("2026-01-03", "stock") is False   # Saturday
+    assert is_market_day("2026-01-04", "stock") is False   # Sunday
+    assert is_market_day("2026-01-03", "crypto") is True
+
+
+@pytest.mark.unit
+def test_the_hit_rate_names_its_sample(tmp_path):
+    """A percentage alone reads the same at n=2 as at n=200; the report shows
+    the calls the rate is made of."""
+    text = summarize(_log_with(tmp_path, [
+        ("NVDA", "2026-01-05", "**Rating**: Buy\n\nx", (0.10, 0.04)),
+        ("AAPL", "2026-01-05", "**Rating**: Buy\n\nx", (-0.02, -0.02)),
+    ])).render()
+    assert "50% (1/2)" in text

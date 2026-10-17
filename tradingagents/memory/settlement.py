@@ -10,6 +10,12 @@ from tradingagents.dataflows.vendors.yahoo.market import get_closes
 
 logger = logging.getLogger(__name__)
 
+# How far the benchmark's last close may lag the stock's exit bar before the
+# settlement waits for fresher prices instead of scoring against them. Long
+# enough to cover a market holiday and its weekend, short enough that a series
+# still this far behind is missing data, not a closed day.
+_BENCHMARK_MAX_STALENESS_DAYS = 3
+
 
 def resolve_benchmark(ticker: str, config: dict) -> str:
     """Pick the benchmark ticker for alpha calculation against ``ticker``.
@@ -84,8 +90,15 @@ def fetch_returns(
     # The window is the stock's own sessions; the benchmark is valued at its
     # last close by each end, so both returns span the same dates even when
     # the calendars differ (a coin trades at weekends, an index does not).
-    # It must have traded through the exit, or its close there may yet move.
-    if bench.empty or bench.index[0] > entry or bench.index[-1] < exit_:
+    # The benchmark must have opened by the entry, and its last close must be
+    # fresh enough at the exit to still stand for it: bounded staleness for a
+    # holiday mismatch (a crypto Saturday exit under an index silent since
+    # Friday, an ADR window while its home market was shut), pending when the
+    # lag says the series may not be final yet (an index that has not printed
+    # for a week is stale, not shut).
+    if bench.empty or bench.index[0] > entry:
+        return None, None, None, None
+    if (exit_ - bench.index[-1]).days > _BENCHMARK_MAX_STALENESS_DAYS:
         return None, None, None, None
 
     raw = float((stock.iloc[holding_days] - stock.iloc[0]) / stock.iloc[0])

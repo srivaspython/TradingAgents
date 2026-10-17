@@ -36,6 +36,9 @@ def iter_grid(start_date: str, end_date: str, every_n_days: int = 1) -> list[str
 
     A future date has no outcome to settle against, and the graph rejects one, so
     the grid stops at the present rather than producing cells that cannot score.
+    Calendar days are kept as given: weekends matter for crypto, and which days
+    are holidays is exchange-specific, so trading-day filtering happens per
+    asset type at run time (see ``run_backtest``).
     """
     start, end = _canonical(start_date), _canonical(end_date)
     if every_n_days < 1:
@@ -65,14 +68,28 @@ def _canonical(date: str) -> datetime:
 def _alpha(entry: dict) -> float | None:
     """Alpha return of a settled entry, or None when it has not settled.
 
-    The log stores it as a percentage rounded to one decimal, so aggregates here
-    are accurate to 0.1 of a percentage point, not to the raw quote.
+    The log stores it as a percentage rounded to two decimals (0.1 on entries
+    written before two-decimal storage), so aggregates here are accurate to
+    the stored percentage point, not to the raw quote.
     """
     text = (entry.get("alpha") or "").strip().rstrip("%")
     try:
         return float(text) / 100
     except ValueError:
         return None
+
+
+def is_market_day(date: str, asset_type: str = "stock") -> bool:
+    """Whether a grid date names a day the asset's market can trade.
+
+    Weekends are closed days for every exchange; holidays are exchange-specific,
+    so a stock-holiday cell is left for the run to meet (the market analyst
+    reports no bar, and the memory log's idempotency guard makes a same-week
+    re-run of the same ticker and date cheap).
+    """
+    if asset_type == "crypto":
+        return True
+    return datetime.strptime(date, "%Y-%m-%d").weekday() < 5
 
 
 @dataclass
@@ -93,8 +110,12 @@ _DIRECTION = {"Buy": 1, "Overweight": 1, "Hold": 0, "Underweight": -1, "Sell": -
 @dataclass
 class RatingScore:
     count: int
-    hit_rate: float | None
+    hits: int | None  # calls the outcome proved right; None when the rating claims no direction
     mean_alpha: float
+
+    @property
+    def hit_rate(self) -> float | None:
+        return (self.hits / self.count) if self.hits is not None else None
 
 
 @dataclass
@@ -109,7 +130,8 @@ class BacktestSummary:
         lines = [f"Resolved cells: {self.resolved} · pending: {self.pending}"
                  + (f" · unscored: {self.unscored}" if self.unscored else "")]
         for rating, score in self.by_rating.items():
-            called = (f"called the direction {score.hit_rate:.0%}"
+            # The raw count next to the rate, so n=2 never reads like n=200.
+            called = (f"called the direction {score.hit_rate:.0%} ({score.hits}/{score.count})"
                       if score.hit_rate is not None else "no direction claimed")
             lines.append(
                 f"- {rating}: n={score.count}, {called}, "
@@ -158,8 +180,9 @@ def run_backtest(
     # A ticker or date given twice is one cell, run and settled once.
     tickers, dates = list(dict.fromkeys(tickers)), list(dict.fromkeys(dates))
     cells = [(ticker, date) for ticker in tickers for date in dates]
+    cells = [cell for cell in cells if is_market_day(cell[1], asset_type)]
     todo = [cell for cell in cells if cell not in done]
-    result.skipped = len(cells) - len(todo)
+    result.skipped = len([(t, d) for t in tickers for d in dates]) - len(todo)
     for index, (ticker, date) in enumerate(todo, 1):
         if progress:
             progress(index, len(todo), ticker, date)
@@ -192,8 +215,9 @@ def summarize(source: BacktestResult | str | Path) -> BacktestSummary:
     entries = TradingMemoryLog({"memory_log_path": str(path)}).load_entries()
     # A decision with no readable rating has no direction, so it can neither
     # count for nor against the system; it is reported as unscored instead.
-    resolved = [(e, _alpha(e)) for e in entries
-                if not e["pending"] and e["rating"] != RATING_REVIEW]
+    resolved = [
+        (e, _alpha(e)) for e in entries if not e["pending"] and e["rating"] != RATING_REVIEW
+    ]
     resolved = [(e, a) for e, a in resolved if a is not None]
     by_rating: dict[str, RatingScore] = {}
     for rating in dict.fromkeys(e["rating"] for e, _ in resolved):
@@ -201,14 +225,20 @@ def summarize(source: BacktestResult | str | Path) -> BacktestSummary:
         direction = _DIRECTION.get(rating, 0)
         by_rating[rating] = RatingScore(
             count=len(alphas),
-            hit_rate=(sum(a * direction > 0 for a in alphas) / len(alphas)) if direction else None,
+            hits=(sum(a * direction > 0 for a in alphas)) if direction else None,
             mean_alpha=sum(alphas) / len(alphas),
         )
     unscored = sum(1 for e in entries if e["rating"] == RATING_REVIEW)
     # Report the window the outcomes were actually measured over, from the log.
-    windows = {f"{e['holding'][:-1]} trading days" for e, _ in resolved
-               if (e.get("holding") or "").endswith("d")}
-    return BacktestSummary(resolved=len(resolved),
-                           pending=len(entries) - len(resolved) - unscored,
-                           by_rating=by_rating, unscored=unscored,
-                           holding=", ".join(sorted(windows)) or "the configured window")
+    windows = {
+        f"{e['holding'][:-1]} trading days"
+        for e, _ in resolved
+        if (e.get("holding") or "").endswith("d")
+    }
+    return BacktestSummary(
+        resolved=len(resolved),
+        pending=len(entries) - len(resolved) - unscored,
+        by_rating=by_rating,
+        unscored=unscored,
+        holding=", ".join(sorted(windows)) or "the configured window",
+    )

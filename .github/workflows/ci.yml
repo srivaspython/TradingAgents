@@ -65,3 +65,27 @@ jobs:
         # The repo is fully clean under the strict select, so we lint everything
         # (generated results/ is excluded via pyproject extend-exclude).
         run: ruff check .
+      - name: Format check on files this PR touches
+        # Whole-repo `ruff format` adoption is deferred (see [tool.ruff.lint] in
+        # pyproject.toml), so a full-repo check would fail on untouched files.
+        # Instead: any .py file already formatted on the base branch must still
+        # be formatted after this PR, and every newly added .py file must be
+        # formatted — the formatted set only grows.
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --depth=1 origin "${{ github.base_ref }}"
+          base="origin/${{ github.base_ref }}"
+          failed=0
+          for f in $(git diff --name-only --diff-filter=AMR "$base"...HEAD -- '*.py'); do
+            if ! ruff format --check "$f" >/dev/null 2>&1; then
+              if git cat-file -e "$base:$f" 2>/dev/null && \
+                 git show "$base:$f" | ruff format --check - >/dev/null 2>&1; then
+                echo "::error file=$f::was formatted on $base but no longer is; run 'ruff format $f'"
+                failed=1
+              elif ! git cat-file -e "$base:$f" 2>/dev/null; then
+                echo "::error file=$f::new Python files must be formatted; run 'ruff format $f'"
+                failed=1
+              fi
+            fi
+          done
+          exit $failed
