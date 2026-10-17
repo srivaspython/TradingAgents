@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Changes that need action when upgrading are listed under "Upgrading from" in their release.
 
+## [Unreleased]
+
+### Fixed
+
+- A backtest no longer spends a run on weekend cells: dates with no session are skipped for stocks and kept for crypto, and the skipped count includes them.
+- A decision whose benchmark had not traded through the exit bar (an ADR window while its home market was shut, a coin exit on a day the index was closed) now settles against the benchmark's last close, up to a few days of lag; a benchmark silent for longer is treated as missing data and the decision stays pending rather than scoring against stale prices.
+- Returns in the memory log are stored at two-decimal precision, so backtest aggregates lose at most a hundredth of a percentage point to rounding instead of a tenth.
+- The backtest summary names the calls each hit rate is made of (`50% (1/2)`), so a two-cell rate no longer reads like a two-hundred-cell one.
+- The `backtest` command warns up front when the grid's tail dates are still inside the holding window and cannot settle until a later run.
+- CI checks formatting on the Python files a PR touches: a file that was formatted must stay formatted, and new files must be formatted, while whole-repo `ruff format` adoption remains deferred.
+
+### Tests
+
+- Alpha Vantage news requests are pinned to never ask past the analysis date, and OHLCV rows after the analysis date are pinned out of both the download and the cache path, matching the lookahead coverage the other vendors have.
+
 ## [0.6.0] — 2026-10-03
 
 HTML reports, a provider per model tier, past decisions settled for every ticker while the analysts work, and company news read while Yahoo's news feed is down.

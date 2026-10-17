@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime, timedelta
 
 import typer
 
@@ -135,6 +136,19 @@ def backtest(
     if not names:
         console.print("[red]No ticker to analyze; pass them comma-separated, e.g. NVDA,AAPL[/red]")
         raise typer.Exit(code=1)
+
+    # Cells this close to today have no traded holding window to settle
+    # against; they will sit pending until a later pass. Say so up front
+    # rather than letting the summary's pending count surprise.
+    from tradingagents.dataflows.date_window import get_current_date
+    holding = DEFAULT_CONFIG.get("holding_period_days", 5)
+    settleable_end = datetime.strptime(get_current_date(), "%Y-%m-%d") - timedelta(days=holding)
+    late = [d for d in dates if d > settleable_end.strftime("%Y-%m-%d")]
+    if late:
+        console.print(
+            f"[yellow]{len(late)} of {len(dates)} dates fall inside the {holding}-day holding "
+            f"window and cannot settle yet; re-run with --run-id after it has traded.[/yellow]"
+        )
 
     def show_progress(done, total, ticker, date):
         console.print(f"[dim][{done}/{total}] {ticker} {date}[/dim]")

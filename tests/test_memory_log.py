@@ -419,8 +419,8 @@ class TestDeferredReflection:
         log.update_with_outcome("NVDA", "2026-01-10", 0.042, 0.021, 5, "Momentum confirmed.")
         text = (tmp_path / "trading_memory.md").read_text(encoding="utf-8")
         assert "[2026-01-10 | NVDA | Buy | pending]" not in text
-        assert "+4.2%" in text
-        assert "+2.1%" in text
+        assert "+4.20%" in text
+        assert "+2.10%" in text
         assert "5d" in text
 
     def test_update_appends_reflection(self, tmp_path):
@@ -477,11 +477,11 @@ class TestDeferredReflection:
         assert e["pending"] is False
         assert e["decision"] == DECISION_BUY.strip()
         assert e["reflection"] == "Momentum confirmed."
-        assert e["raw"] == "+4.2%"
-        assert e["alpha"] == "+2.1%"
+        assert e["raw"] == "+4.20%"
+        assert e["alpha"] == "+2.10%"
         assert e["holding"] == "5d"
         raw_text = (tmp_path / "trading_memory.md").read_text(encoding="utf-8")
-        assert "[2026-01-10 | NVDA | Buy | +4.2% | +2.1% | 5d]\n\nDECISION:" in raw_text
+        assert "[2026-01-10 | NVDA | Buy | +4.20% | +2.10% | 5d]\n\nDECISION:" in raw_text
 
     # Reflector.reflect_on_final_decision
 
@@ -575,6 +575,41 @@ class TestDeferredReflection:
             mock_ticker_cls.side_effect = _make_ticker
             result = settlement.fetch_returns("NVDA", "2026-01-05")
         assert result == (None, None, None, None)
+
+    def test_fetch_returns_settles_when_benchmark_lags_by_a_holiday(self, tmp_path):
+        """Calendars need not match: an exit on a day the benchmark's market
+        was shut (a US holiday under a Tokyo exit) settles against the
+        benchmark's last close, as the asof valuation already promises."""
+        log = make_log(tmp_path)
+        log.store_decision("7203.T", "2026-01-05", DECISION_BUY)
+        reflector = MagicMock()
+        reflector.reflect_on_final_decision.return_value = "Call reviewed."
+        stock = _price_df([100.0, 101.0, 102.0, 103.0, 104.0, 105.0])   # exit 2026-01-10
+        bench = _price_df([400.0, 401.0, 402.0, 403.0, 404.0])          # shut on the exit day
+        with patch("tradingagents.memory.settlement.get_closes") as closes:
+            closes.side_effect = lambda sym, start, end: bench["Close"] if sym == "^N225" else stock["Close"]
+            done = settlement.settle_pending(
+                "7203.T", log, reflector, {"benchmark_ticker": "^N225"})
+        assert done.settled == [("7203.T", "2026-01-05")]
+        entry = log.load_entries()[0]
+        assert entry["pending"] is False and entry["resolved"] == "2026-01-10"
+
+    def test_fetch_returns_stays_pending_when_benchmark_is_stale(self, tmp_path):
+        """A benchmark that has not printed for a week past the exit is missing
+        data, not a closed day: the decision waits rather than scoring alpha
+        against a stale close."""
+        log = make_log(tmp_path)
+        log.store_decision("NVDA", "2026-01-05", DECISION_BUY)
+        reflector = MagicMock()
+        stock = _price_df([100.0, 101.0, 102.0, 103.0, 104.0, 105.0])   # exit 2026-01-10
+        bench = _price_df([400.0, 401.0, 402.0, 403.0, 404.0])          # silent since 2026-01-09
+        with patch("tradingagents.memory.settlement.get_closes") as closes:
+            closes.side_effect = lambda sym, start, end: bench["Close"] if sym == "SPY" else stock["Close"]
+            with patch.object(settlement, "_BENCHMARK_MAX_STALENESS_DAYS", 0):
+                done = settlement.settle_pending("NVDA", log, reflector, {})
+        assert done.settled == [] and done.failed == []
+        assert log.get_pending_entries()  # retried on a later pass
+        reflector.reflect_on_final_decision.assert_not_called()
 
     # settlement.resolve_benchmark picks the index for the alpha calculation
 
@@ -716,8 +751,8 @@ class TestDeferredReflection:
         assert len(entries) == 1
         assert entries[0]["pending"] is False
         assert entries[0]["reflection"] == "Momentum confirmed."
-        assert "+5.0%" in entries[0]["raw"]
-        assert "+2.0%" in entries[0]["alpha"]
+        assert "+5.00%" in entries[0]["raw"]
+        assert "+2.00%" in entries[0]["alpha"]
 
     def test_resolve_leaves_premature_entry_pending(self, tmp_path):
         """#1169: when the outcome can't be settled yet (fetch_returns None),
@@ -1102,12 +1137,32 @@ class TestSettlementWindow:
         spy_by_day = spy.tz_localize(None)
         assert alpha == pytest.approx(raw - (spy_by_day["2026-01-08"] / spy_by_day["2026-01-02"] - 1))
 
-    def test_the_outcome_waits_for_the_benchmark_to_trade_through_the_window(self, monkeypatch):
+    def test_the_outcome_waits_while_the_benchmark_is_days_stale(self, monkeypatch):
+        """An index that has not printed for days past the exit is missing
+        data, not a closed day: the decision stays pending rather than scoring
+        alpha against a stale close."""
         coin = pd.Series([100.0 + i for i in range(10)], index=pd.date_range("2026-01-03", periods=10, freq="D"))
         spy = pd.Series([400.0, 401.0, 402.0], index=pd.to_datetime(["2026-01-02", "2026-01-05", "2026-01-06"]))
         monkeypatch.setattr(settlement, "get_closes", _closes({"BTC-USD": coin, "SPY": spy}))
+        # The exit bar is 2026-01-08; SPY is 2 days stale on it. With zero
+        # staleness allowed this must wait.
+        monkeypatch.setattr(settlement, "_BENCHMARK_MAX_STALENESS_DAYS", 0)
 
         assert settlement.fetch_returns("BTC-USD", "2026-01-03", 5, "SPY") == (None, None, None, None)
+
+    def test_a_benchmark_a_day_shut_at_the_exit_still_settles(self, monkeypatch):
+        """The holiday case: the index's last close stands for the exit day it
+        was shut (the benchmark is valued at its last close by each end)."""
+        coin = pd.Series([100.0 + i for i in range(10)], index=pd.date_range("2026-01-03", periods=10, freq="D"))
+        spy = pd.Series([400.0, 401.0, 402.0, 403.0],
+                        index=pd.to_datetime(["2026-01-02", "2026-01-05", "2026-01-06", "2026-01-07"]))
+        monkeypatch.setattr(settlement, "get_closes", _closes({"BTC-USD": coin, "SPY": spy}))
+
+        raw, alpha, days, resolved = settlement.fetch_returns("BTC-USD", "2026-01-03", 5, "SPY")
+
+        assert raw == pytest.approx(0.05)
+        assert alpha == pytest.approx(raw - (403.0 / 400.0 - 1))  # SPY's last closes by each end
+        assert resolved == "2026-01-08"
 
     def test_a_missing_close_is_skipped_not_scored(self, monkeypatch):
         idx = pd.bdate_range("2026-01-05", periods=8)

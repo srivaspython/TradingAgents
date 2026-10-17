@@ -111,6 +111,22 @@ def test_backtest_can_continue_an_interrupted_sweep(runner, monkeypatch, tmp_pat
 
 
 @pytest.mark.unit
+def test_backtest_warns_when_tail_dates_cannot_settle_yet(runner, monkeypatch, tmp_path):
+    """A grid ending today leaves its last holding window untraded; name it
+    before the sweep rather than after the pending count surprises."""
+    from tradingagents.dataflows import date_window
+
+    monkeypatch.setattr(m, "run_backtest", lambda *a, **kw: _Result(tmp_path))
+    monkeypatch.setattr(m, "summarize", lambda log: _Summary())
+    monkeypatch.setattr(date_window, "get_current_date", lambda: "2026-06-08")
+
+    result = runner.invoke(m.app, ["backtest", "NVDA", "--start", "2026-06-01", "--end", "2026-06-08"])
+
+    assert result.exit_code == 0, result.output
+    assert "holding" in result.output and "--run-id" in result.output
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("args, expected", [
     (["backtest", "NVDA", "--start", "2026-08-01", "--end", "2026-06-08"], "before"),
     (["backtest", ",,", "--start", "2026-06-01", "--end", "2026-06-08"], "ticker"),
